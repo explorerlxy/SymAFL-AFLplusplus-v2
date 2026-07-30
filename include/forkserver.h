@@ -223,8 +223,9 @@ typedef struct afl_forkserver {
   u32   custom_input_len;
   void (*late_send)(void *, const u8 *, size_t);
 
-  /* SymAFL full-stream tracing. When sym_trace_fd is set, the forkserver
-     wait loop drains this pipe alongside its status fd into sym_trace_buf. */
+  /* SymAFL full-stream tracing. When sym_trace_fd is set, afl-fuzz's
+     forkserver-control wait loop drains it alongside the status fd into
+     sym_trace_buf. */
   s32    sym_trace_fd;
   u8    *sym_trace_buf;
   size_t sym_trace_len;

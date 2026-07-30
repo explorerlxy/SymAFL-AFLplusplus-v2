@@ -391,8 +391,9 @@ restart_select:
 
 }
 
-/* Drain the optional SymAFL event pipe without interpreting its frames. The
-   custom mutator owns framing; AFL only prevents a long full trace from
+/* Drain the optional SymAFL event pipe without interpreting its frames. This
+   runs in the afl-fuzz parent while it waits on the target forkserver; the
+   custom mutator owns framing. AFL only prevents a long full trace from
    blocking the forkserver child on a full pipe. */
 static void drain_sym_trace(afl_forkserver_t *fsrv) {
 
@@ -430,8 +431,8 @@ static void drain_sym_trace(afl_forkserver_t *fsrv) {
 
 }
 
-/* Like read_s32_timed(), while also continuously draining the optional
-   SymAFL full-trace pipe. */
+/* Like read_s32_timed(), while the afl-fuzz parent also continuously drains
+   the optional SymAFL full-trace pipe. */
 static u32 __attribute__((hot)) read_s32_timed_with_trace(
     afl_forkserver_t *fsrv, s32 *buf, u32 timeout_ms,
     volatile u8 *stop_soon_p) {
