@@ -135,6 +135,15 @@
 
 #define STAGE_BUF_SIZE (64)  /* usable size for stage name buf in afl_state */
 
+typedef enum {
+
+  PCBT_CANDIDATE_NONE = 0,
+  PCBT_CANDIDATE_ADMIT = 1,
+  PCBT_CANDIDATE_VETO_TERMINAL = 2,
+  PCBT_CANDIDATE_VETO_RLIMIT = 3,
+
+} pcbt_candidate_kind_t;
+
 // Little helper to access the ptr to afl->##name_buf - for use in afl_realloc.
 #define AFL_BUF_PARAM(name) ((void **)&afl->name##_buf)
 
@@ -601,7 +610,10 @@ typedef struct afl_state {
       reinit_table,                     /* reinit the queue weight table    */
       pcbt_mode,                        /* SymAFL PCBT concolic phase       */
       pcbt_switch_pending,              /* restart with concrete target     */
-      pcbt_concrete_active;             /* concrete phase is live           */
+      pcbt_concrete_active,             /* concrete phase is live           */
+      pcbt_probe_active;                /* current target run is a probe    */
+
+  pcbt_candidate_kind_t pcbt_candidate_kind;
 
   u8 *virgin_bits,                      /* Regions yet untouched by fuzzing */
       *virgin_tmout,                    /* Bits we haven't seen in tmouts   */
@@ -1115,6 +1127,15 @@ struct custom_mutator {
   void (*afl_custom_post_run)(void *data);
 
   /**
+   * Consume a SymAFL measurement-probe result without allowing AFL++ to
+   * update virgin_bits or save the probe as a queue entry.
+   *
+   * (Optional; SymAFL extension)
+   */
+  void (*afl_custom_probe_result)(void *data, const u8 *buf, size_t buf_size,
+                                  u8 new_bits);
+
+  /**
    * Allow for additional analysis (e.g. calling a different tool that does a
    * different kind of coverage and saves this for the custom mutator).
    *
@@ -1160,6 +1181,7 @@ u8   trim_case_custom(afl_state_t *, struct queue_entry *q, u8 *in_buf,
                       struct custom_mutator *mutator);
 void run_afl_custom_queue_new_entry(afl_state_t *, struct queue_entry *, u8 *,
                                     u8 *);
+void run_afl_custom_probe_result(afl_state_t *, const u8 *, size_t, u8);
 
 /* Python */
 #ifdef USE_PYTHON

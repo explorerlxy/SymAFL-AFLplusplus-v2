@@ -275,6 +275,16 @@ inline u8 has_new_bits_unclassified(afl_state_t *afl, u8 *virgin_map) {
 
 }
 
+static inline u8 check_probe_new_bits(afl_state_t *afl) {
+
+  u8 *probe_virgin = ck_alloc(afl->fsrv.map_size);
+  memcpy(probe_virgin, afl->virgin_bits, afl->fsrv.map_size);
+  u8 new_bits = has_new_bits_unclassified(afl, probe_virgin);
+  ck_free(probe_virgin);
+  return new_bits;
+
+}
+
 /* Compact trace bytes into a smaller bitmap. We effectively just drop the
    count information here. This is called only sporadically, for some
    new paths. */
@@ -482,6 +492,23 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
 
   if (unlikely(len == 0)) { return 0; }
 
+  /* SymAFL probes measure immediate bitmap gain but must not mutate AFL's
+     virgin bitmap or enter the normal queue. Evaluate against a temporary
+     virgin copy, then hand the result to the mutator for probe logging. */
+  if (unlikely(afl->pcbt_probe_active)) {
+
+    u8 new_bits = 0;
+    if (likely(fault == afl->crash_mode)) {
+
+      new_bits = check_probe_new_bits(afl);
+
+    }
+
+    run_afl_custom_probe_result(afl, mem, len, new_bits);
+    return 0;
+
+  }
+
   if (unlikely(fault == FSRV_RUN_TMOUT && afl->afl_env.afl_ignore_timeouts)) {
 
     if (unlikely(afl->schedule >= FAST && afl->schedule <= RARE)) {
@@ -509,6 +536,8 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
   u8  san_fault = 0;
   u8  san_idx = 0;
   u8  feed_san = 0;
+
+  const u8 save_diag = getenv("SYMAFL_SAVE_DIAG") != NULL;
 
   afl->san_case_status = 0;
 
@@ -654,6 +683,20 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
 
     fault = san_fault;
     classified = new_bits;
+
+    if (save_diag) {
+      fprintf(stderr,
+              "[save-diag] save new_bits=%u fault=%u queue_cur=%s syncing=%s "
+              "pcbt_mode=%u concrete=%u probe=%u candidate_kind=%u "
+              "stage=%s:%s stage_cur=%u\n",
+              new_bits, fault, afl->queue_cur ? "set" : "null",
+              afl->syncing_party ? (const char *)afl->syncing_party : "none",
+              afl->pcbt_mode, afl->pcbt_concrete_active, afl->pcbt_probe_active,
+              (unsigned)afl->pcbt_candidate_kind,
+              afl->stage_name ? (const char *)afl->stage_name : "?",
+              afl->stage_short ? (const char *)afl->stage_short : "?",
+              afl->stage_cur);
+    }
 
   save_to_queue:
 
@@ -1077,4 +1120,3 @@ may_save_fault:
   return keeping;
 
 }
-

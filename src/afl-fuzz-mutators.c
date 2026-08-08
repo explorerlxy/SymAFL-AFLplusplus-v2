@@ -70,6 +70,28 @@ void run_afl_custom_queue_new_entry(afl_state_t *afl, struct queue_entry *q,
 
 }
 
+void run_afl_custom_probe_result(afl_state_t *afl, const u8 *buf,
+                                 size_t buf_size, u8 new_bits) {
+
+  if (afl->custom_mutators_count) {
+
+    LIST_FOREACH(&afl->custom_mutator_list, struct custom_mutator, {
+
+      if (el->afl_custom_probe_result) {
+
+        el->afl_custom_probe_result(el->data, buf, buf_size, new_bits);
+
+      }
+
+    });
+
+  }
+
+  afl->pcbt_probe_active = 0;
+  afl->pcbt_candidate_kind = PCBT_CANDIDATE_NONE;
+
+}
+
 void setup_custom_mutators(afl_state_t *afl) {
 
   /* Try mutator library first */
@@ -409,6 +431,18 @@ struct custom_mutator *load_custom_mutator(afl_state_t *afl, const char *fn) {
 
   }
 
+  /* "afl_custom_probe_result", optional SymAFL extension */
+  mutator->afl_custom_probe_result = dlsym(dh, "afl_custom_probe_result");
+  if (!mutator->afl_custom_probe_result) {
+
+    ACTF("optional symbol 'afl_custom_probe_result' not found.");
+
+  } else {
+
+    OKF("Found 'afl_custom_probe_result'.");
+
+  }
+
   /* "afl_custom_queue_new_entry", optional */
   mutator->afl_custom_queue_new_entry = dlsym(dh, "afl_custom_queue_new_entry");
   if (!mutator->afl_custom_queue_new_entry) {
@@ -653,4 +687,3 @@ abort_trimming:
   return fault;
 
 }
-
