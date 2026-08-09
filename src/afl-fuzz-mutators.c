@@ -431,6 +431,18 @@ struct custom_mutator *load_custom_mutator(afl_state_t *afl, const char *fn) {
 
   }
 
+  /* "afl_custom_exec_time", optional SymAFL extension */
+  mutator->afl_custom_exec_time = dlsym(dh, "afl_custom_exec_time");
+  if (!mutator->afl_custom_exec_time) {
+
+    ACTF("optional symbol 'afl_custom_exec_time' not found.");
+
+  } else {
+
+    OKF("Found 'afl_custom_exec_time'.");
+
+  }
+
   /* "afl_custom_probe_result", optional SymAFL extension */
   mutator->afl_custom_probe_result = dlsym(dh, "afl_custom_probe_result");
   if (!mutator->afl_custom_probe_result) {

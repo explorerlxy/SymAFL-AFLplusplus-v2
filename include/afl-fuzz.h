@@ -1127,6 +1127,15 @@ struct custom_mutator {
   void (*afl_custom_post_run)(void *data);
 
   /**
+   * Report the monotonic wall time spent inside one forkserver target run.
+   * This is a SymAFL extension; the duration excludes custom-mutator
+   * post-processing and is measured around afl_fsrv_run_target().
+   *
+   * (Optional; SymAFL extension)
+   */
+  void (*afl_custom_exec_time)(void *data, u64 elapsed_ns);
+
+  /**
    * Consume a SymAFL measurement-probe result without allowing AFL++ to
    * update virgin_bits or save the probe as a queue entry.
    *

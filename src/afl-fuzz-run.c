@@ -46,6 +46,25 @@ fsrv_run_result_t __attribute__((hot)) fuzz_run_target(afl_state_t      *afl,
                                                        afl_forkserver_t *fsrv,
                                                        u32 timeout) {
 
+  u8 measure_custom_exec = 0;
+  struct timespec custom_exec_start = {0};
+
+  if (unlikely(afl->custom_mutators_count)) {
+
+    LIST_FOREACH(&afl->custom_mutator_list, struct custom_mutator, {
+
+      if (el->afl_custom_exec_time) { measure_custom_exec = 1; }
+
+    });
+
+  }
+
+  if (measure_custom_exec) {
+
+    clock_gettime(CLOCK_MONOTONIC, &custom_exec_start);
+
+  }
+
 #ifdef PROFILING
   static u64      time_spent_start = 0;
   struct timespec spec;
@@ -61,6 +80,40 @@ fsrv_run_result_t __attribute__((hot)) fuzz_run_target(afl_state_t      *afl,
 #endif
 
   fsrv_run_result_t res = afl_fsrv_run_target(fsrv, timeout, &afl->stop_soon);
+
+  if (measure_custom_exec) {
+
+    struct timespec custom_exec_stop;
+    clock_gettime(CLOCK_MONOTONIC, &custom_exec_stop);
+    u64 elapsed_sec =
+        (u64)(custom_exec_stop.tv_sec - custom_exec_start.tv_sec);
+    u64 elapsed_nsec;
+    if (custom_exec_stop.tv_nsec >= custom_exec_start.tv_nsec) {
+
+      elapsed_nsec = (u64)(custom_exec_stop.tv_nsec -
+                           custom_exec_start.tv_nsec);
+
+    } else {
+
+      elapsed_sec -= 1;
+      elapsed_nsec = 1000000000ULL -
+                     (u64)(custom_exec_start.tv_nsec -
+                           custom_exec_stop.tv_nsec);
+
+    }
+    u64 elapsed_ns = elapsed_sec * 1000000000ULL + elapsed_nsec;
+
+    LIST_FOREACH(&afl->custom_mutator_list, struct custom_mutator, {
+
+      if (el->afl_custom_exec_time) {
+
+        el->afl_custom_exec_time(el->data, elapsed_ns);
+
+      }
+
+    });
+
+  }
 
 #ifdef __AFL_CODE_COVERAGE
   if (unlikely(!fsrv->persistent_trace_bits)) {
@@ -1237,4 +1290,3 @@ u8 __attribute__((hot)) common_fuzz_stuff(afl_state_t *afl, u8 *out_buf,
   return 0;
 
 }
-
