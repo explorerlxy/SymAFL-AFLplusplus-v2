@@ -431,6 +431,25 @@ static void drain_sym_trace(afl_forkserver_t *fsrv) {
 
 }
 
+/* Drain until empty, then briefly re-check. Catches a race where the child
+   finishes atexit flush just as we see the status word (parent write-end still
+   open means we never get EOF — only EAGAIN). */
+static void drain_sym_trace_complete(afl_forkserver_t *fsrv) {
+
+  if (fsrv->sym_trace_fd < 0) return;
+  for (int pass = 0; pass < 8; pass++) {
+
+    size_t before = fsrv->sym_trace_len;
+    drain_sym_trace(fsrv);
+    if (fsrv->sym_trace_len == before && pass > 0) break;
+    /* Yield so a finishing child can push the last frames. */
+    struct timeval tv = {.tv_sec = 0, .tv_usec = 200};
+    select(0, NULL, NULL, NULL, &tv);
+
+  }
+
+}
+
 /* Like read_s32_timed(), while the afl-fuzz parent also continuously drains
    the optional SymAFL full-trace pipe. */
 static u32 __attribute__((hot)) read_s32_timed_with_trace(
@@ -470,7 +489,7 @@ static u32 __attribute__((hot)) read_s32_timed_with_trace(
 
       ssize_t len_read = read(fsrv->fsrv_st_fd, buf, 4);
       if (len_read != 4) return 0;
-      drain_sym_trace(fsrv);
+      drain_sym_trace_complete(fsrv);
       // AFL++ reserves zero for forkserver communication failure. A child
       // completing within the same millisecond is still a valid execution.
       u32 elapsed = (u32)(get_cur_time() - start);
@@ -2117,6 +2136,9 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
 
     fsrv->last_run_timed_out = 1;
     if (read(fsrv->fsrv_st_fd, &fsrv->child_status, 4) < 4) { exec_ms = 0; }
+    /* Timeout path previously skipped the event-pipe drain, so a partial
+       stream was handed to the mutator as if it were complete. */
+    drain_sym_trace_complete(fsrv);
 
   }
 
