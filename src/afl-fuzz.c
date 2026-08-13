@@ -543,121 +543,6 @@ static void fasan_check_afl_preload(char *afl_preload) {
 
 }
 
-/* PCBT starts on the concolic build, whose edge IDs intentionally do not
-   describe the concrete build. Once the mutator proves the tree saturated,
-   replace the forkserver only at this scheduler boundary. The current queue
-   remains useful input, but every coverage-derived property is rebuilt. */
-static void switch_pcbt_to_concrete(afl_state_t *afl) {
-
-  if (!afl->pcbt_switch_pending) return;
-  if (!afl->pcbt_mode || !afl->pcbt_concrete_target) {
-
-    FATAL("PCBT requested a concrete switch without a concrete target");
-
-  }
-  if (afl->fsrv.qemu_mode || afl->fsrv.frida_mode || afl->fsrv.cs_mode ||
-      afl->unicorn_mode) {
-
-    FATAL("PCBT concrete fallback supports native forkserver targets only");
-
-  }
-
-  ACTF("PCBT saturated; restarting forkserver with concrete target %s",
-       afl->pcbt_concrete_target);
-
-  afl->pcbt_switch_pending = 0;
-  afl->pcbt_concrete_active = 1;
-  afl_fsrv_kill(&afl->fsrv);
-
-  ck_free(afl->fsrv.target_path);
-  afl->fsrv.target_path = ck_strdup(afl->pcbt_concrete_target);
-  ck_free(afl->argv[0]);
-  afl->argv[0] = ck_strdup(afl->pcbt_concrete_target);
-
-  // Start once to learn the concrete target's requested map size. The two
-  // builds may have different edge counts; the map is therefore resized when
-  // needed before the fresh concrete coverage universe is initialized.
-  u32 map_size = afl->fsrv.map_size;
-  afl_fsrv_start(&afl->fsrv, afl->argv, &afl->stop_soon,
-                 afl->afl_env.afl_debug_child);
-  if (afl->fsrv.real_map_size > map_size) {
-
-    u32 new_map_size = afl->fsrv.real_map_size;
-    afl_fsrv_kill(&afl->fsrv);
-    afl->virgin_bits = ck_realloc(afl->virgin_bits, new_map_size);
-    afl->virgin_tmout = ck_realloc(afl->virgin_tmout, new_map_size);
-    afl->virgin_crash = ck_realloc(afl->virgin_crash, new_map_size);
-    afl->var_bytes = ck_realloc(afl->var_bytes, new_map_size);
-    afl->top_rated = ck_realloc(afl->top_rated,
-                                new_map_size * sizeof(void *));
-    afl->clean_trace = ck_realloc(afl->clean_trace, new_map_size);
-    afl->clean_trace_custom = ck_realloc(afl->clean_trace_custom,
-                                         new_map_size);
-    afl->first_trace = ck_realloc(afl->first_trace, new_map_size);
-    afl->map_tmp_buf = ck_realloc(afl->map_tmp_buf, new_map_size);
-    afl_shm_deinit(&afl->shm);
-    afl->fsrv.map_size = new_map_size;
-    afl->fsrv.trace_bits =
-        afl_shm_init(&afl->shm, new_map_size, afl->non_instrumented_mode);
-    map_size = new_map_size;
-    afl_fsrv_start(&afl->fsrv, afl->argv, &afl->stop_soon,
-                   afl->afl_env.afl_debug_child);
-
-  }
-
-  memset(afl->virgin_bits, 0xff, map_size);
-  memset(afl->virgin_tmout, 0xff, map_size);
-  memset(afl->virgin_crash, 0xff, map_size);
-  memset(afl->var_bytes, 0, map_size);
-  memset(afl->top_rated, 0, map_size * sizeof(void *));
-  memset(afl->clean_trace, 0, map_size);
-  memset(afl->clean_trace_custom, 0, map_size);
-  memset(afl->first_trace, 0, map_size);
-
-  afl->total_bitmap_size = 0;
-  afl->total_bitmap_entries = 0;
-  afl->queued_with_cov = 0;
-  afl->queued_variable = 0;
-  afl->var_byte_count = 0;
-  afl->queued_favored = 0;
-  afl->pending_favored = 0;
-  afl->pending_not_fuzzed = 0;
-  afl->smallest_favored = -1;
-  afl->score_changed = 1;
-  afl->reinit_table = 1;
-
-  for (u32 i = 0; i < afl->queued_items; ++i) {
-
-    struct queue_entry *q = afl->queue_buf[i];
-    if (!q) continue;
-    ck_free(q->trace_mini);
-    q->trace_mini = NULL;
-    q->tc_ref = 0;
-    q->exec_cksum = 0;
-    q->exec_us = 0;
-    q->bitmap_size = 0;
-    q->handicap = 0;
-    q->cal_failed = 0;
-    q->has_new_cov = false;
-    q->var_behavior = false;
-    q->favored = false;
-    q->was_fuzzed = false;
-    q->fuzz_level = 0;
-    if (!q->disabled) ++afl->pending_not_fuzzed;
-
-  }
-
-  // This is the concrete bootstrap: retain all discovered queue files, but
-  // calibrate each one against the fresh bitmap before ordinary AFL resumes.
-  afl->queue_cur = NULL;
-  afl->current_entry = 0;
-  perform_dry_run(afl);
-  cull_queue(afl);
-  OKF("Concrete forkserver ready; bootstrapped %u retained queue entries",
-      afl->queued_items);
-
-}
-
 /* Main entry point */
 
 int main(int argc, char **argv_orig, char **envp) {
@@ -715,6 +600,18 @@ int main(int argc, char **argv_orig, char **envp) {
   afl->debug = debug;
   afl_fsrv_init(&afl->fsrv);
   if (debug) { afl->fsrv.debug = true; }
+  // Three-fsrv pipeline: SYMAFL_CONCOLIC_TARGET presence selects PCBT mode
+  // (main fsrv = concrete target; concolic + sanitizer forkservers spawned at
+  // setup_shm time, after the mutator's capture init has set TAINT_OPTIONS).
+  // The secondary forkservers must be afl_fsrv_init'd here so the mutator's
+  // init_forkserver_capture can attach sym_trace_fd to fsrv_concolic.
+  afl->pcbt_mode = !!getenv("SYMAFL_CONCOLIC_TARGET");
+  if (afl->pcbt_mode) {
+
+    afl_fsrv_init(&afl->fsrv_concolic);
+    afl_fsrv_init(&afl->fsrv_san);
+
+  }
   read_afl_environment(afl, envp);
   if (afl->shm.map_size) { afl->fsrv.map_size = afl->shm.map_size; }
   exit_1 = !!afl->afl_env.afl_bench_just_one;
@@ -2373,15 +2270,16 @@ int main(int argc, char **argv_orig, char **envp) {
 
   if (afl->pcbt_mode) {
 
-    const char *concolic_target = getenv("SYMAFL_CONCOLIC_TARGET");
-    struct stat expected_st, selected_st;
-    if (!concolic_target || stat(concolic_target, &expected_st) ||
-        stat(afl->fsrv.target_path, &selected_st) ||
-        expected_st.st_dev != selected_st.st_dev ||
-        expected_st.st_ino != selected_st.st_ino) {
+    // Three-fsrv pipeline: the CLI target is the concrete binary; the
+    // concolic (SYMAFL_CONCOLIC_TARGET) and sanitizer (SYMAFL_SANITIZER_TARGET,
+    // optional) forkservers are spawned at setup_shm time. No inode check.
+    // Secondary binaries are validated with access() only — check_binary()
+    // assigns afl->fsrv.target_path and must not run for them (the main
+    // forkserver would later exec the secondary binary).
+    const char *san_target = getenv("SYMAFL_SANITIZER_TARGET");
+    if (san_target && *san_target && access(san_target, X_OK)) {
 
-      FATAL("PCBT must start with SYMAFL_CONCOLIC_TARGET; the concrete "
-            "target is selected only after PCBT saturation");
+      PFATAL("SYMAFL_SANITIZER_TARGET is not executable: %s", san_target);
 
     }
 
@@ -2716,6 +2614,133 @@ int main(int argc, char **argv_orig, char **envp) {
                      afl->afl_env.afl_debug_child);
 
       map_size = new_map_size;
+
+    }
+
+  }
+
+  /* SymAFL three-fsrv pipeline: spawn the concolic and sanitizer forkservers
+     now that the mutator's init (setup_custom_mutators above) has created the
+     trace pipe + SHM control block and extended TAINT_OPTIONS, and after the
+     main fsrv is running (so the main coverage SHM env is undisturbed by the
+     temporary flip below). The main fsrv stays the concrete target: the
+     concolic forkserver is only run on coverage-gaining admitted candidates
+     by the mutator, the sanitizer forkserver after it. */
+  if (afl->pcbt_mode) {
+
+    const char *concolic_target = getenv("SYMAFL_CONCOLIC_TARGET");
+    if (!concolic_target || !*concolic_target) {
+
+      FATAL("PCBT mode requires SYMAFL_CONCOLIC_TARGET "
+            "(CLI target is the concrete binary)");
+
+    }
+    // Lightweight validation only: check_binary() also assigns
+    // afl->fsrv.target_path, and the concolic binary must NOT become the main
+    // forkserver's exec target (the main fsrv spawns later and would then run
+    // the traced binary, mixing its slow symbolic runs into the coverage loop
+    // and timing out the seed dry-run).
+    if (access(concolic_target, X_OK)) {
+
+      PFATAL("SYMAFL_CONCOLIC_TARGET is not executable: %s", concolic_target);
+
+    }
+
+    /* --- fsrv_concolic: ko-clang + DFSan target, own coverage SHM --- */
+    afl_fsrv_init_dup(&afl->fsrv_concolic, &afl->fsrv);
+    afl->fsrv_concolic.target_path = ck_strdup((u8 *)concolic_target);
+    afl->fsrv_concolic.asanfuzz_binary = afl->fsrv_concolic.target_path;
+    afl->fsrv_concolic.init_child_func = sanfuzz_exec_child;
+    if (getenv("SYMAFL_CONCOLIC_TMOUT")) {
+
+      afl->fsrv_concolic.exec_tmout =
+          (u32)atoi(getenv("SYMAFL_CONCOLIC_TMOUT"));
+
+    }
+    if (getenv("SYMAFL_CONCOLIC_MEM")) {
+
+      afl->fsrv_concolic.mem_limit = (u64)atoi(getenv("SYMAFL_CONCOLIC_MEM"));
+
+    }
+
+    // The concolic child writes its own trace-pc-guard coverage; it must NOT
+    // land in the main (concrete) SHM. Temporarily point SHM_ENV_VAR at the
+    // concolic shm across the spawn(s), then restore it for the rest of the
+    // run (the running children already bound their own shm at exec).
+    char *saved_shm = getenv(SHM_ENV_VAR) ? ck_strdup((u8 *)getenv(SHM_ENV_VAR))
+                                          : NULL;
+    u32 cmap = MAX(map_size, (u32)DEFAULT_SHMEM_SIZE);
+    afl->fsrv_concolic.map_size = cmap;
+    char vbuf[16];
+    snprintf(vbuf, sizeof(vbuf), "%u", cmap);
+    setenv("AFL_MAP_SIZE", vbuf, 1);
+    afl->fsrv_concolic.trace_bits =
+        afl_shm_init(&afl->concolic_shm, cmap, 0);
+    afl->concolic_shm_active = true;
+    u32 cnew = afl_fsrv_get_mapsize(&afl->fsrv_concolic, afl->argv,
+                                    &afl->stop_soon,
+                                    afl->afl_env.afl_debug_child);
+    if (cnew > cmap) {
+
+      afl_fsrv_kill(&afl->fsrv_concolic);
+      afl_shm_deinit(&afl->concolic_shm);
+      afl->fsrv_concolic.map_size = cnew;
+      afl->fsrv_concolic.trace_bits =
+          afl_shm_init(&afl->concolic_shm, cnew, 0);
+      afl_fsrv_start(&afl->fsrv_concolic, afl->argv, &afl->stop_soon,
+                     afl->afl_env.afl_debug_child);
+
+    }
+    if (saved_shm) {
+
+      setenv(SHM_ENV_VAR, saved_shm, 1);
+      ck_free(saved_shm);
+
+    } else {
+
+      unsetenv(SHM_ENV_VAR);
+
+    }
+    OKF("Concolic forkserver started (%s, map=%u)",
+        concolic_target, afl->fsrv_concolic.map_size);
+
+    /* --- fsrv_san: ASAN target, no coverage (AFL_SAN_NO_INST) --- */
+    const char *san_target = getenv("SYMAFL_SANITIZER_TARGET");
+    if (san_target && *san_target) {
+
+      afl_fsrv_init_dup(&afl->fsrv_san, &afl->fsrv);
+      afl->fsrv_san.trace_bits = ck_alloc(afl->fsrv.map_size + 8);
+      afl->fsrv_san.map_size = afl->fsrv.map_size;
+      afl->fsrv_san.san_but_not_instrumented = 1;
+      afl->fsrv_san.asanfuzz_binary = (char *)san_target;
+      afl->fsrv_san.target_path = (char *)san_target;
+      afl->fsrv_san.init_child_func = sanfuzz_exec_child;
+      afl->fsrv_san.child_kill_signal = afl->fsrv.child_kill_signal;
+      afl->fsrv_san.fsrv_kill_signal = afl->fsrv.fsrv_kill_signal;
+      if ((map_size <= DEFAULT_SHMEM_SIZE ||
+           afl->fsrv_san.map_size < map_size) &&
+          !afl->non_instrumented_mode && !afl->afl_env.afl_skip_bin_check) {
+
+        afl->fsrv_san.map_size = MAX(map_size, (u32)DEFAULT_SHMEM_SIZE);
+        char svbuf[16];
+        snprintf(svbuf, sizeof(svbuf), "%u", afl->fsrv_san.map_size);
+        setenv("AFL_MAP_SIZE", svbuf, 1);
+
+      }
+      u32 snew = afl_fsrv_get_mapsize(&afl->fsrv_san, afl->argv,
+                                      &afl->stop_soon,
+                                      afl->afl_env.afl_debug_child);
+      if (snew > afl->fsrv_san.map_size) {
+
+        afl_fsrv_kill(&afl->fsrv_san);
+        ck_free(afl->fsrv_san.trace_bits);
+        afl->fsrv_san.map_size = snew;
+        afl->fsrv_san.trace_bits = ck_alloc(snew + 8);
+        afl_fsrv_start(&afl->fsrv_san, afl->argv, &afl->stop_soon,
+                       afl->afl_env.afl_debug_child);
+
+      }
+      OKF("Sanitizer forkserver started (%s)", san_target);
 
     }
 
@@ -3164,7 +3189,6 @@ int main(int argc, char **argv_orig, char **envp) {
 
   while (likely(!afl->stop_soon)) {
 
-    switch_pcbt_to_concrete(afl);
     if (unlikely(afl->stop_soon)) break;
 
     cull_queue(afl);
@@ -3733,6 +3757,7 @@ stop_fuzzing:
   destroy_extras(afl);
   destroy_custom_mutators(afl);
   afl_shm_deinit(&afl->shm);
+  if (afl->concolic_shm_active) { afl_shm_deinit(&afl->concolic_shm); }
 
   if (afl->shm_fuzz) {
 
@@ -3747,6 +3772,14 @@ stop_fuzzing:
 
     ck_free(afl->san_fsrvs[i].trace_bits);
     afl_fsrv_deinit(&afl->san_fsrvs[i]);
+
+  }
+
+  if (afl->pcbt_mode) {
+
+    afl_fsrv_deinit(&afl->fsrv_concolic);
+    if (afl->fsrv_san.trace_bits) { ck_free(afl->fsrv_san.trace_bits); }
+    afl_fsrv_deinit(&afl->fsrv_san);
 
   }
 

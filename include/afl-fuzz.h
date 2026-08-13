@@ -503,6 +503,7 @@ typedef struct afl_state {
 
   afl_forkserver_t fsrv;
   sharedmem_t      shm;
+  sharedmem_t      concolic_shm;        /* SymAFL concolic target's own map  */
   sharedmem_t     *shm_fuzz;
   afl_env_vars_t   afl_env;
 
@@ -608,9 +609,7 @@ typedef struct afl_state {
       cycle_schedules,                  /* cycle power schedules?           */
       old_seed_selection,               /* use vanilla afl seed selection   */
       reinit_table,                     /* reinit the queue weight table    */
-      pcbt_mode,                        /* SymAFL PCBT concolic phase       */
-      pcbt_switch_pending,              /* restart with concrete target     */
-      pcbt_concrete_active,             /* concrete phase is live           */
+      pcbt_mode,                        /* SymAFL PCBT three-fsrv pipeline   */
       pcbt_probe_active;                /* current target run is a probe    */
 
   pcbt_candidate_kind_t pcbt_candidate_kind;
@@ -618,8 +617,6 @@ typedef struct afl_state {
   u8 *virgin_bits,                      /* Regions yet untouched by fuzzing */
       *virgin_tmout,                    /* Bits we haven't seen in tmouts   */
       *virgin_crash;                    /* Bits we haven't seen in crashes  */
-
-  u8 *pcbt_concrete_target;             /* concrete forkserver executable   */
 
   double *alias_probability;            /* alias weighted probabilities     */
   u32    *alias_table;                /* alias weighted random lookup table */
@@ -749,6 +746,15 @@ typedef struct afl_state {
 
   char            *cmplog_binary;
   afl_forkserver_t cmplog_fsrv;     /* cmplog has its own little forkserver */
+
+  /* SymAFL three-fsrv pipeline: the main fsrv is the concrete target; the
+     concolic forkserver runs only on coverage-gaining admitted candidates
+     (SEDBT learning), the sanitizer forkserver runs after it for crash
+     detection. Both are spawned at startup when SYMAFL_CONCOLIC_TARGET /
+     SYMAFL_SANITIZER_TARGET are set. */
+  afl_forkserver_t fsrv_concolic;   /* SymAFL concolic (ko-clang) forkserver */
+  afl_forkserver_t fsrv_san;        /* SymAFL sanitizer (ASAN) forkserver   */
+  bool             concolic_shm_active; /* concolic_shm init guard (deinit) */
 
   /* ASAN Fuzing */
   char            *san_binary[MAX_EXTRA_SAN_BINARY];

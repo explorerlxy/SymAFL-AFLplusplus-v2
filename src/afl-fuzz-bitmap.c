@@ -562,7 +562,11 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
   /* Only "normal" inputs seem interested to us */
   if (likely(fault == afl->crash_mode)) {
 
-    if (unlikely(afl->san_binary_length) &&
+    /* SymAFL pcbt mode gates the SAND feed block entirely: the sanitizer is
+       driven by the mutator (SYMAFL_SANITIZER_TARGET) on coverage-gaining
+       admitted candidates after the concolic stage, so the SAND census and
+       runs must stay inert here to avoid double-executing the sanitizer. */
+    if (!afl->pcbt_mode && unlikely(afl->san_binary_length) &&
         likely(afl->san_abstraction == SIMPLIFY_TRACE)) {
 
       memcpy(afl->san_fsrvs[0].trace_bits, afl->fsrv.trace_bits,
@@ -584,7 +588,7 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
 
     }
 
-    if (unlikely(afl->san_binary_length) &&
+    if (!afl->pcbt_mode && unlikely(afl->san_binary_length) &&
         unlikely(afl->san_abstraction == COVERAGE_INCREASE)) {
 
       /* Check if the input increase the coverage */
@@ -594,7 +598,7 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
 
     }
 
-    if (unlikely(afl->san_binary_length) &&
+    if (!afl->pcbt_mode && unlikely(afl->san_binary_length) &&
         likely(afl->san_abstraction == UNIQUE_TRACE)) {
 
       cksum_unique =
@@ -609,7 +613,7 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
 
     }
 
-    if (feed_san) {
+    if (!afl->pcbt_mode && feed_san) {
 
       /* The input seems interested to other sanitizers, feed it into extra
        * binaries. */
@@ -687,11 +691,11 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
     if (save_diag) {
       fprintf(stderr,
               "[save-diag] save new_bits=%u fault=%u queue_cur=%s syncing=%s "
-              "pcbt_mode=%u concrete=%u probe=%u candidate_kind=%u "
+              "pcbt_mode=%u probe=%u candidate_kind=%u "
               "stage=%s:%s stage_cur=%u\n",
               new_bits, fault, afl->queue_cur ? "set" : "null",
               afl->syncing_party ? (const char *)afl->syncing_party : "none",
-              afl->pcbt_mode, afl->pcbt_concrete_active, afl->pcbt_probe_active,
+              afl->pcbt_mode, afl->pcbt_probe_active,
               (unsigned)afl->pcbt_candidate_kind,
               afl->stage_name ? (const char *)afl->stage_name : "?",
               afl->stage_short ? (const char *)afl->stage_short : "?",

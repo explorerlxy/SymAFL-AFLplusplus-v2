@@ -778,11 +778,11 @@ void add_to_queue(afl_state_t *afl, u8 *fname, u32 len, u8 passed_det) {
     if (getenv("SYMAFL_QUEUE_DIAG") || getenv("SYMAFL_SAVE_DIAG")) {
       fprintf(stderr,
               "[queue-diag] id=%u fname=%s queue_cur=%s syncing=%s "
-              "pcbt_mode=%u concrete=%u candidate_kind=%u "
+              "pcbt_mode=%u candidate_kind=%u "
               "stage=%s:%s stage_cur=%u\n",
               q->id, fname, afl->queue_cur ? "set" : "null",
               afl->syncing_party ? (const char *)afl->syncing_party : "none",
-              afl->pcbt_mode, afl->pcbt_concrete_active,
+              afl->pcbt_mode,
               (unsigned)afl->pcbt_candidate_kind,
               afl->stage_name ? (const char *)afl->stage_name : "?",
               afl->stage_short ? (const char *)afl->stage_short : "?",
